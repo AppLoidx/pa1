@@ -22,14 +22,33 @@
 
 #define PIPE_OPENED_F "Opened pipe: %d -> %d\n"
 #define PIPE_CLOSED_F "Closed pipe: %d -> %d\n"
+#define MAX_PROC 10
 
 typedef struct
 {
     int in;
     int out;
+    int callee;
+    int caller;
 } pipe_io;
 
+typedef struct
+{
+    int local_id;
+    pipe_io pipe_read[MAX_PROCESS_ID + 1];
+    pipe_io pipe_write[MAX_PROCESS_ID + 1];
+
+} proc_data;
+
 // Utility methods
+
+int pipe_pos_count_reader(int source, int target, int n) {
+    return target * (n - 1) + source - (source > target ? 1 : 0); 
+}
+
+int pipe_pos_count_writer(int source, int target, int n) {
+    return source * (n - 1) + target - (target > source ? 1 : 0);
+}
 
 int parse_process_amount(int argc, char *argv[])
 {
@@ -40,6 +59,11 @@ int parse_process_amount(int argc, char *argv[])
 FILE *open_pipe_logfile()
 {
     return fopen(pipes_log, "w+");
+}
+
+FILE *open_event_logfile()
+{
+    return fopen(events_log, "w+");
 }
 
 int close_file(FILE *file)
@@ -59,7 +83,6 @@ void flogger(FILE *__stream, const char *__fmt, ...)
         vprintf(__fmt, args);
     }
 }
-
 
 void logger(const char *__fmt, ...)
 {
@@ -104,6 +127,18 @@ bool create_pipe(pipe_io *pipe_io)
     return 1;
 }
 
+pipe_io * create_pipes(int amount) {
+    pipe_io pipes [amount];
+    
+    for (int i = 0; i < amount; i++) {
+        create_pipe(&pipes[i]);
+    }
+
+    return pipes;
+
+}
+
+
 bool close_pipe(pipe_io pipe_io)
 {
 
@@ -115,7 +150,9 @@ bool close_pipe(pipe_io pipe_io)
         FILE *pipe_log = open_pipe_logfile();
         flogger(pipe_log, PIPE_CLOSED_F, pipe_io.in, pipe_io.out);
         close_file(pipe_log);
-    } else {
+    }
+    else
+    {
         logger("Cannot close pipes : %d -> %d", pipe_io.in, pipe_io.out);
     }
 
@@ -130,19 +167,59 @@ void debug_pipe_io(pipe_io pipe_io)
         printf("[LOG] PIPE IO: in = %d, out = %d\n", pipe_io.in, pipe_io.out);
 }
 
+int child_job(proc_data proc_data)
+{
+    printf("Hello! I am a child of my parent. ID: %d\n", proc_data.local_id);
+
+    return 0;
+}
+
+pid_t create_child_proccess(int local_id, FILE *log_file, pipe_io * pipes, int proc_amount)
+{
+
+    proc_data proc_data = {.local_id = local_id};
+    create_pipe(&proc_data.pipe_read[local_id]);
+    create_pipe(&proc_data.pipe_write[local_id]);
+
+
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+
+        // child
+        int job_s = child_job(proc_data);
+
+        exit(job_s);
+    }
+    else
+    {
+        // parent
+    }
+
+    return pid;
+}
+
+void start(int proc_amount)
+{
+    FILE *event_file = open_event_logfile();
+    pid_t pids[proc_amount];
+
+
+    pipe_io * pipes = create_pipes(proc_amount * (proc_amount - 1));
+
+    for (int i = 0; i < proc_amount; i++)
+    {
+        pids[i] = create_child_proccess(i, event_file, pipes, proc_amount);
+    }
+}
+
 int main(int argc, char *argv[])
 {
     // int proccess_amount = parse_process_amount(argc, argv);
 
-    int *ifd, *ofd;
-    ifd = (int *)malloc(sizeof(int));
-    ofd = (int *)malloc(sizeof(int));
-    pipe_io pipe;
-    create_pipe(&pipe);
+    // start(4);
 
-    debug_pipe_io(pipe);
-
-    close_pipe(pipe);
+    // printf("%d %d", pipe_pos_count_reader(2, 0, 3), pipe_pos_count_writer(2, 1, 3));
 
     return 0;
 }
