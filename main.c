@@ -28,8 +28,6 @@ typedef struct
 {
     int in;
     int out;
-    int callee;
-    int caller;
 } pipe_io;
 
 typedef struct
@@ -37,6 +35,8 @@ typedef struct
     local_id local_id;
     pipe_io *pipes;
     size_t proc_amount;
+    pid_t parent_pid;
+    FILE *event_fd;
 
 } proc_data;
 
@@ -71,12 +71,12 @@ int parse_process_amount(int argc, char *argv[])
 
 FILE *open_pipe_logfile()
 {
-    return fopen(pipes_log, "w+");
+    return fopen(pipes_log, "a+");
 }
 
 FILE *open_event_logfile()
 {
-    return fopen(events_log, "w+");
+    return fopen(events_log, "a+");
 }
 
 int close_file(FILE *file)
@@ -95,6 +95,12 @@ void flogger(FILE *__stream, const char *__fmt, ...)
         va_start(args, __fmt); // call twice if DEBUG enabled
         vprintf(__fmt, args);
     }
+}
+
+void vflogger(FILE *__stream, const char *__fmt, va_list args)
+{
+
+    vfprintf(__stream, __fmt, args);
 }
 
 void logger(const char *__fmt, ...)
@@ -116,6 +122,22 @@ void pipe_opened_log(int ifd, int ofd)
     close_file(pipe_log);
 }
 
+void event_log(const char *__fmt, ...)
+{
+    va_list args;
+    va_start(args, __fmt);
+    FILE *file = open_event_logfile();
+    vflogger(file, __fmt, args);
+
+    if (DEBUG == 1)
+    {
+        va_start(args, __fmt); // call twice if DEBUG enabled
+        vprintf(__fmt, args);
+    }
+
+    close_file(file);
+}
+
 bool create_pipe(pipe_io *pipe_io)
 {
     int fds[2];
@@ -129,7 +151,6 @@ bool create_pipe(pipe_io *pipe_io)
     }
     else
     {
-        puts("Pipe created successfully");
     }
 
     pipe_opened_log(fds[0], fds[1]);
@@ -200,15 +221,58 @@ bool create_msg(Message *msg, MessageType type, const char *__format, ...)
 
 int child_job(proc_data proc_data, pipe_io *pipes)
 {
-    printf("Hello! I am a child of my parent. ID: %d\n", proc_data.local_id);
-    Message msg;
-    create_msg(&msg, DONE, "Hello-hello, Onee-chan! %d\n", 2);
-    send(&proc_data, proc_data.local_id, &msg);
+    Message msg_started;
 
-    Message msg_r;
-    receive(&proc_data, proc_data.local_id, &msg_r);
+    create_msg(&msg_started, STARTED, log_started_fmt, proc_data.local_id, getpid(), proc_data.parent_pid);
+    flogger(proc_data.event_fd, log_started_fmt, proc_data.local_id, getpid(), proc_data.parent_pid);
 
-    printf("Received message : %s", msg_r.s_payload);
+    send_multicast(&proc_data, &msg_started);
+
+    for (local_id id = 1; id < proc_data.proc_amount; ++id)
+    {
+
+        if (id == proc_data.local_id)
+        {
+            continue;
+        }
+
+        Message msg_r1;
+        if (receive(&proc_data, id, &msg_r1) < 0)
+        {
+            perror("Error in msg_r1");
+            return -1;
+        }
+
+        assert(msg_r1.s_header.s_type == STARTED);
+    }
+
+    flogger(proc_data.event_fd, log_received_all_started_fmt, proc_data.local_id);
+
+    Message msg_done;
+
+    create_msg(&msg_done, DONE, log_done_fmt, proc_data.local_id);
+
+    flogger(proc_data.event_fd, log_done_fmt, proc_data.local_id);
+    send_multicast(&proc_data, &msg_done);
+
+    for (local_id id = 1; id < proc_data.proc_amount; ++id)
+    {
+        if (id == proc_data.local_id)
+        {
+            continue;
+        }
+
+        Message msg_r2;
+        if (receive(&proc_data, id, &msg_r2) < 0)
+        {
+            perror("Error in msg_r2");
+            return -1;
+        }
+
+        assert(msg_r2.s_header.s_type == DONE);
+    }
+
+    flogger(proc_data.event_fd, log_received_all_done_fmt, proc_data.local_id);
 
     return 0;
 }
@@ -216,7 +280,12 @@ int child_job(proc_data proc_data, pipe_io *pipes)
 pid_t create_child_proccess(int local_id, FILE *log_file, pipe_io *pipes, int proc_amount)
 {
 
-    proc_data proc_data = {.local_id = local_id, .pipes = pipes, .proc_amount = proc_amount};
+    proc_data proc_data = {
+        .local_id = local_id,
+        .pipes = pipes,
+        .proc_amount = proc_amount,
+        .parent_pid = getpid(),
+        .event_fd = log_file};
 
     pid_t pid = fork();
     if (pid == 0)
@@ -224,39 +293,136 @@ pid_t create_child_proccess(int local_id, FILE *log_file, pipe_io *pipes, int pr
 
         // child
         int job_s = child_job(proc_data, pipes);
-
         exit(job_s);
     }
     else
     {
+
         // parent
     }
 
     return pid;
 }
 
+int kill(pid_t pid, int sig);
 
+int parent_wait(proc_data proc_data)
+{
+    flogger(proc_data.event_fd, log_started_fmt, proc_data.local_id, getpid(), proc_data.parent_pid);
+
+    for (local_id id = 1; id < proc_data.proc_amount; ++id)
+    {
+
+        if (id == proc_data.local_id)
+        {
+            continue;
+        }
+
+        Message msg_r1;
+        if (receive(&proc_data, id, &msg_r1) < 0)
+        {
+            perror("Error in msg_r1");
+            return -1;
+        }
+
+        assert(msg_r1.s_header.s_type == STARTED);
+    }
+
+    flogger(proc_data.event_fd, log_received_all_started_fmt, proc_data.local_id);
+    flogger(proc_data.event_fd, log_done_fmt, proc_data.local_id);
+
+    for (local_id id = 1; id < proc_data.proc_amount; ++id)
+    {
+        if (id == proc_data.local_id)
+        {
+            continue;
+        }
+
+        Message msg_r2;
+        if (receive(&proc_data, id, &msg_r2) < 0)
+        {
+            perror("Error in msg_r2");
+            return -1;
+        }
+
+        assert(msg_r2.s_header.s_type == DONE);
+    }
+
+    flogger(proc_data.event_fd, log_received_all_done_fmt, proc_data.local_id);
+
+    return 0;
+}
 
 void start(int proc_amount)
 {
+
+    fclose(fopen(events_log, "w"));
+    fclose(fopen(pipes_log, "w"));
+
     FILE *event_file = open_event_logfile();
-    pid_t pids[proc_amount];
+    pid_t pids[proc_amount - 1];
 
     int amount = proc_amount * (proc_amount - 1);
     pipe_io *pipes = malloc(sizeof(pipe_io) * amount);
     create_pipes(proc_amount * (proc_amount - 1), pipes);
 
-    for (int i = 0; i < proc_amount; i++)
+    for (int i = 1; i < proc_amount; i++)
     {
-        pids[i] = create_child_proccess(i, event_file, pipes, proc_amount);
+        pids[i - 1] = create_child_proccess(i, event_file, pipes, proc_amount);
     }
+
+    proc_data parent_proc_data = {
+        .local_id = PARENT_ID,
+        .event_fd = event_file,
+        .parent_pid = getpid(),
+        .pipes = pipes,
+        .proc_amount = proc_amount};
+
+    parent_wait(parent_proc_data);
+
+    fclose(event_file);
+
+    int status;
+    pid_t wpid;
+    while ((wpid = wait(&status)) > 0);
+    for (int i = 0; i < proc_amount - 1; i++)
+    {
+        kill(pids[i], SIGKILL);
+    }
+
+    free(pipes);
+}
+
+int parse_proc_amount(int argc, char * argv[], int * proc_amount) {
+    int opt;
+
+    while ((opt = getopt(argc, argv, "p:")) > 0) {
+        if (opt == 'p') {
+            *proc_amount = atoi(optarg) + 1;
+            return 0;
+        }
+    }
+
+    return -1;
 }
 
 int main(int argc, char *argv[])
 {
     // int proccess_amount = parse_process_amount(argc, argv);
 
-    start(4);
+    int proc_amount;
+    if ( -1 == parse_proc_amount(argc, argv, &proc_amount)) {
+        puts("Invalid format. Use -p ");
+        return -1;
+    }
+
+    if (proc_amount < 0 || proc_amount > MAX_PROCESS_ID + 1) {
+        puts("Invalid size of processes amount");
+        return -2;
+    }
+    
+
+    start(proc_amount);
 
     // printf("%d %d", pipe_pos_count_reader(2, 0, 3), pipe_pos_count_writer(2, 1, 3));
 
@@ -276,8 +442,11 @@ int main(int argc, char *argv[])
 int send(void *self, local_id dst, const Message *msg)
 {
     const proc_data *proc_data = self;
-    const int pipe_index = pipe_pos_count_writer_adj(proc_data->local_id, dst, proc_data->proc_amount);
-    return write(proc_data->pipes[pipe_index].out, msg, sizeof(MessageHeader) + msg->s_header.s_payload_len);
+    const int pipe_index = pipe_pos_count_writer(proc_data->local_id, dst, proc_data->proc_amount);
+
+    write(proc_data->pipes[pipe_index].out, msg, sizeof(MessageHeader) + msg->s_header.s_payload_len);
+
+    return 0;
 }
 
 //------------------------------------------------------------------------------
@@ -294,6 +463,23 @@ int send(void *self, local_id dst, const Message *msg)
  */
 int send_multicast(void *self, const Message *msg)
 {
+    const proc_data *proc_data = self;
+    for (local_id id = 0; id < proc_data->proc_amount; ++id)
+    {
+
+        if (id == proc_data->local_id)
+        {
+            continue;
+        }
+
+        int send_res = send(self, id, msg);
+
+        if (send_res != 0)
+        {
+            return -1;
+        }
+    }
+
     return 0;
 }
 
@@ -312,7 +498,7 @@ int send_multicast(void *self, const Message *msg)
 int receive(void *self, local_id from, Message *msg)
 {
     const proc_data *proc_data = self;
-    const int pipe_index = pipe_pos_count_reader_adj(proc_data->local_id, from, proc_data->proc_amount);
+    const int pipe_index = pipe_pos_count_reader(proc_data->local_id, from, proc_data->proc_amount);
 
     if (-1 == read(proc_data->pipes[pipe_index].in, &(msg->s_header), sizeof(MessageHeader)))
     {
@@ -321,8 +507,11 @@ int receive(void *self, local_id from, Message *msg)
 
     if (-1 == read(proc_data->pipes[pipe_index].in, msg->s_payload, msg->s_header.s_payload_len))
     {
+
         return -20;
-    } else {
+    }
+    else
+    {
         return 0;
     }
 }
@@ -341,6 +530,23 @@ int receive(void *self, local_id from, Message *msg)
  */
 int receive_any(void *self, Message *msg)
 {
+    const proc_data *proc_data = self;
+    while (true)
+    {
+        for (local_id id = 0; id < proc_data->proc_amount; ++id)
+        {
+            if (id == proc_data->local_id)
+            {
+                continue;
+            }
+
+            if (receive(self, id, msg) == 0)
+            {
+                return 0;
+            }
+        }
+    }
+
     return 0;
 }
 
