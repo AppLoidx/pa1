@@ -219,7 +219,7 @@ bool create_msg(Message *msg, MessageType type, const char *__format, ...)
     return true;
 }
 
-int child_job(proc_data proc_data, pipe_io *pipes)
+int child_job(proc_data proc_data)
 {
     Message msg_started;
 
@@ -277,22 +277,67 @@ int child_job(proc_data proc_data, pipe_io *pipes)
     return 0;
 }
 
+void close_pipes(pipe_io *pipes, int len)
+{
+    for (int i = 0; i < len; i++)
+    {
+        if (pipes[i].in != -1)
+        {
+            close(pipes[i].in);
+        }
+        if (pipes[i].out != -1)
+        {
+            close(pipes[i].out);
+        }
+
+        FILE *pipe_log = open_pipe_logfile();
+        flogger(pipe_log, PIPE_CLOSED_F, pipes[i].in, pipes[i].out);
+        close_file(pipe_log);
+    }
+}
+
 pid_t create_child_proccess(int local_id, FILE *log_file, pipe_io *pipes, int proc_amount)
 {
-
-    proc_data proc_data = {
-        .local_id = local_id,
-        .pipes = pipes,
-        .proc_amount = proc_amount,
-        .parent_pid = getpid(),
-        .event_fd = log_file};
 
     pid_t pid = fork();
     if (pid == 0)
     {
 
+        int amount = proc_amount * (proc_amount - 1);
+        pipe_io *pipes_p = malloc(sizeof(pipe_io) * amount);
+
+        for (int i = 0; i < proc_amount; i++)
+        {
+            if (i == local_id)
+            {
+                continue;
+            }
+            int r_index = pipe_pos_count_reader(local_id, i, proc_amount);
+            pipes_p[r_index].in = pipes[r_index].in;
+            pipes_p[r_index].out = -1; //pipes[r_index].out;
+
+            pipes[r_index].in = -1;
+
+            int w_index = pipe_pos_count_writer(local_id, i, proc_amount);
+            pipes_p[w_index].in = -1; //pipes[w_index].in;
+            pipes_p[w_index].out = pipes[w_index].out;
+
+            pipes[w_index].out = -1;
+        }
+
+        close_pipes(pipes, amount);
+
+        free(pipes);
+
+        proc_data proc_data = {
+            .local_id = local_id,
+            .pipes = pipes_p,
+            .proc_amount = proc_amount,
+            .parent_pid = getpid(),
+            .event_fd = log_file};
+
         // child
-        int job_s = child_job(proc_data, pipes);
+        int job_s = child_job(proc_data);
         exit(job_s);
     }
     else
@@ -364,6 +409,7 @@ void start(int proc_amount)
 
     int amount = proc_amount * (proc_amount - 1);
     pipe_io *pipes = malloc(sizeof(pipe_io) * amount);
+
     create_pipes(proc_amount * (proc_amount - 1), pipes);
 
     for (int i = 1; i < proc_amount; i++)
@@ -371,33 +417,62 @@ void start(int proc_amount)
         pids[i - 1] = create_child_proccess(i, event_file, pipes, proc_amount);
     }
 
+    pipe_io *pipes_p = malloc(sizeof(pipe_io) * amount);
+
+    for (int i = 0; i < proc_amount; i++)
+    {
+        if (i == PARENT_ID)
+        {
+            continue;
+        }
+        int r_index = pipe_pos_count_reader(PARENT_ID, i, proc_amount);
+        pipes_p[r_index].in = pipes[r_index].in;
+        pipes_p[r_index].out = pipes[r_index].out;
+
+        pipes[r_index].in = -1;
+        pipes[r_index].out = -1;
+
+        int w_index = pipe_pos_count_writer(PARENT_ID, i, proc_amount);
+        pipes_p[w_index].in = pipes[w_index].in;
+        pipes_p[w_index].out = pipes[w_index].out;
+
+        pipes[w_index].in = -1;
+        pipes[w_index].out = -1;
+    }
+    close_pipes(pipes, amount);
+
+    free(pipes);
+
     proc_data parent_proc_data = {
         .local_id = PARENT_ID,
         .event_fd = event_file,
         .parent_pid = getpid(),
-        .pipes = pipes,
+        .pipes = pipes_p,
         .proc_amount = proc_amount};
 
     parent_wait(parent_proc_data);
 
     fclose(event_file);
+    free(pipes_p);
 
     int status;
     pid_t wpid;
-    while ((wpid = wait(&status)) > 0);
+    while ((wpid = wait(&status)) > 0)
+        ;
     for (int i = 0; i < proc_amount - 1; i++)
     {
         kill(pids[i], SIGKILL);
     }
-
-    free(pipes);
 }
 
-int parse_proc_amount(int argc, char * argv[], int * proc_amount) {
+int parse_proc_amount(int argc, char *argv[], int *proc_amount)
+{
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:")) > 0) {
-        if (opt == 'p') {
+    while ((opt = getopt(argc, argv, "p:")) > 0)
+    {
+        if (opt == 'p')
+        {
             *proc_amount = atoi(optarg) + 1;
             return 0;
         }
@@ -411,16 +486,17 @@ int main(int argc, char *argv[])
     // int proccess_amount = parse_process_amount(argc, argv);
 
     int proc_amount;
-    if ( -1 == parse_proc_amount(argc, argv, &proc_amount)) {
+    if (-1 == parse_proc_amount(argc, argv, &proc_amount))
+    {
         puts("Invalid format. Use -p ");
         return -1;
     }
 
-    if (proc_amount < 0 || proc_amount > MAX_PROCESS_ID + 1) {
+    if (proc_amount < 0 || proc_amount > MAX_PROCESS_ID + 1)
+    {
         puts("Invalid size of processes amount");
         return -2;
     }
-    
 
     start(proc_amount);
 
