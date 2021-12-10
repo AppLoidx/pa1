@@ -434,7 +434,7 @@ void start(int proc_amount)
 
         int w_index = pipe_pos_count_writer(PARENT_ID, i, proc_amount);
         pipes_p[w_index].in = -1; //pipes[w_index].in;
-        pipes_p[w_index].out = pipes[w_index].out;
+        pipes_p[w_index].out = -1; //pipes[w_index].out;
 
         pipes[w_index].in = -1;
         pipes[w_index].out = -1;
