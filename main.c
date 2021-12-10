@@ -52,23 +52,6 @@ int pipe_pos_count_writer(int source, int target, int n)
     return source * (n - 1) + target - (target > source ? 1 : 0);
 }
 
-// adjusted implementations
-int pipe_pos_count_reader_adj(int source, int target, int n)
-{
-    return pipe_pos_count_reader(source - 1, target - 1, n);
-}
-
-int pipe_pos_count_writer_adj(int source, int target, int n)
-{
-    return pipe_pos_count_writer(source - 1, target - 1, n);
-}
-
-int parse_process_amount(int argc, char *argv[])
-{
-    // TODO: implement
-    return 2 + 1;
-}
-
 FILE *open_pipe_logfile()
 {
     return fopen(pipes_log, "a+");
@@ -219,15 +202,8 @@ bool create_msg(Message *msg, MessageType type, const char *__format, ...)
     return true;
 }
 
-int child_job(proc_data proc_data)
+int receive_all_X_msg(proc_data proc_data, int16_t type)
 {
-    Message msg_started;
-
-    create_msg(&msg_started, STARTED, log_started_fmt, proc_data.local_id, getpid(), proc_data.parent_pid);
-    flogger(proc_data.event_fd, log_started_fmt, proc_data.local_id, getpid(), proc_data.parent_pid);
-
-    send_multicast(&proc_data, &msg_started);
-
     for (local_id id = 1; id < proc_data.proc_amount; ++id)
     {
 
@@ -243,13 +219,36 @@ int child_job(proc_data proc_data)
             return -1;
         }
 
-        assert(msg_r1.s_header.s_type == STARTED);
+        assert(msg_r1.s_header.s_type == type);
     }
+
+    return 0;
+}
+
+int receive_all_started_msg(proc_data proc_data)
+{
+    return receive_all_X_msg(proc_data, STARTED);
+}
+
+int receive_all_done_msg(proc_data proc_data)
+{
+    return receive_all_X_msg(proc_data, DONE);
+}
+
+int child_job(proc_data proc_data)
+{
+    Message msg_started;
+    create_msg(&msg_started, STARTED, log_started_fmt, proc_data.local_id, getpid(), proc_data.parent_pid);
+    
+    flogger(proc_data.event_fd, log_started_fmt, proc_data.local_id, getpid(), proc_data.parent_pid);
+
+    send_multicast(&proc_data, &msg_started);
+
+    receive_all_started_msg(proc_data);
 
     flogger(proc_data.event_fd, log_received_all_started_fmt, proc_data.local_id);
 
     Message msg_done;
-
     create_msg(&msg_done, DONE, log_done_fmt, proc_data.local_id);
 
     flogger(proc_data.event_fd, log_done_fmt, proc_data.local_id);
@@ -296,6 +295,31 @@ void close_pipes(pipe_io *pipes, int len)
     }
 }
 
+void convert_pipes(int local_id, pipe_io *pipes, int proc_amount, pipe_io *pipes_p)
+{
+    int amount = proc_amount * (proc_amount - 1);
+    for (int i = 0; i < proc_amount; i++)
+    {
+        if (i == local_id)
+        {
+            continue;
+        }
+        int r_index = pipe_pos_count_reader(local_id, i, proc_amount);
+        pipes_p[r_index].in = pipes[r_index].in;
+        pipes_p[r_index].out = -1; //pipes[r_index].out;
+
+        pipes[r_index].in = -1;
+
+        int w_index = pipe_pos_count_writer(local_id, i, proc_amount);
+        pipes_p[w_index].in = -1; //pipes[w_index].in;
+        pipes_p[w_index].out = pipes[w_index].out;
+
+        pipes[w_index].out = -1;
+    }
+
+    close_pipes(pipes, amount);
+}
+
 pid_t create_child_proccess(int local_id, FILE *log_file, pipe_io *pipes, int proc_amount)
 {
 
@@ -304,29 +328,9 @@ pid_t create_child_proccess(int local_id, FILE *log_file, pipe_io *pipes, int pr
     {
 
         int amount = proc_amount * (proc_amount - 1);
+
         pipe_io *pipes_p = malloc(sizeof(pipe_io) * amount);
-
-        for (int i = 0; i < proc_amount; i++)
-        {
-            if (i == local_id)
-            {
-                continue;
-            }
-            int r_index = pipe_pos_count_reader(local_id, i, proc_amount);
-            pipes_p[r_index].in = pipes[r_index].in;
-            pipes_p[r_index].out = -1; //pipes[r_index].out;
-
-            pipes[r_index].in = -1;
-
-            int w_index = pipe_pos_count_writer(local_id, i, proc_amount);
-            pipes_p[w_index].in = -1; //pipes[w_index].in;
-            pipes_p[w_index].out = pipes[w_index].out;
-
-            pipes[w_index].out = -1;
-        }
-
-        close_pipes(pipes, amount);
-
+        convert_pipes(local_id, pipes, proc_amount, pipes_p);
         free(pipes);
 
         proc_data proc_data = {
@@ -355,43 +359,12 @@ int parent_wait(proc_data proc_data)
 {
     flogger(proc_data.event_fd, log_started_fmt, proc_data.local_id, getpid(), proc_data.parent_pid);
 
-    for (local_id id = 1; id < proc_data.proc_amount; ++id)
-    {
-
-        if (id == proc_data.local_id)
-        {
-            continue;
-        }
-
-        Message msg_r1;
-        if (receive(&proc_data, id, &msg_r1) < 0)
-        {
-            perror("Error in msg_r1");
-            return -1;
-        }
-
-        assert(msg_r1.s_header.s_type == STARTED);
-    }
+    receive_all_started_msg(proc_data);
 
     flogger(proc_data.event_fd, log_received_all_started_fmt, proc_data.local_id);
     flogger(proc_data.event_fd, log_done_fmt, proc_data.local_id);
 
-    for (local_id id = 1; id < proc_data.proc_amount; ++id)
-    {
-        if (id == proc_data.local_id)
-        {
-            continue;
-        }
-
-        Message msg_r2;
-        if (receive(&proc_data, id, &msg_r2) < 0)
-        {
-            perror("Error in msg_r2");
-            return -1;
-        }
-
-        assert(msg_r2.s_header.s_type == DONE);
-    }
+    receive_all_done_msg(proc_data);
 
     flogger(proc_data.event_fd, log_received_all_done_fmt, proc_data.local_id);
 
@@ -418,25 +391,7 @@ void start(int proc_amount)
     }
 
     pipe_io *pipes_p = malloc(sizeof(pipe_io) * amount);
-
-    for (int i = 0; i < proc_amount; i++)
-    {
-        if (i == PARENT_ID)
-        {
-            continue;
-        }
-        int r_index = pipe_pos_count_reader(PARENT_ID, i, proc_amount);
-        pipes_p[r_index].in = pipes[r_index].in;
-        pipes_p[r_index].out = -1; //pipes[r_index].out;
-
-        pipes[r_index].in = -1;
-
-        int w_index = pipe_pos_count_writer(PARENT_ID, i, proc_amount);
-        pipes_p[w_index].in = -1; //pipes[w_index].in;
-        pipes_p[w_index].out = pipes[w_index].out;
-
-        pipes[w_index].out = -1;
-    }
+    convert_pipes(PARENT_ID, pipes, proc_amount, pipes_p);
     close_pipes(pipes, amount);
 
     free(pipes);
